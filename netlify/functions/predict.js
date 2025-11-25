@@ -22,8 +22,8 @@ exports.handler = async (event) => {
     const body = JSON.parse(event.body);
     console.log('Received data:', body);
     
-    // Use the working endpoint from our local tests
-    const response = await axios.post(
+    // Submit prediction
+    const submitResponse = await axios.post(
       'https://syedalaibarehman-integrate.hf.space/gradio_api/call/predict_fn',
       {
         data: [
@@ -46,44 +46,28 @@ exports.handler = async (event) => {
       }
     );
 
-    console.log('API Response:', response.data);
+    console.log('API Response:', submitResponse.data);
 
-    // If it returns event_id, use the correct status endpoint
-    if (response.data && response.data.event_id) {
-      const eventId = response.data.event_id;
-      console.log('Got event_id:', eventId);
-      
-      // Use the correct status endpoint
-      const result = await pollForResult(eventId);
-      
-      return {
-        statusCode: 200,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ 
-          success: true, 
-          prediction: result 
-        })
-      };
-    } else {
-      // Direct response
-      return {
-        statusCode: 200,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ 
-          success: true, 
-          prediction: response.data 
-        })
-      };
-    }
+    const eventId = submitResponse.data.event_id;
+    console.log('Got event_id:', eventId);
+
+    // Use the CORRECT status endpoint
+    const result = await pollForResult(eventId);
+    
+    return {
+      statusCode: 200,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ 
+        success: true, 
+        prediction: result 
+      })
+    };
     
   } catch (error) {
-    console.error('Error:', error.response?.data || error.message);
+    console.error('Final Error:', error.message);
     return {
       statusCode: 500,
       headers: {
@@ -92,38 +76,48 @@ exports.handler = async (event) => {
       },
       body: JSON.stringify({ 
         success: false, 
-        error: error.message,
-        response: error.response?.data
+        error: error.message
       })
     };
   }
 };
 
-// Correct polling function
+// CORRECT polling function with right endpoint
 async function pollForResult(eventId, maxAttempts = 20) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      // Correct status endpoint
+      // CORRECT STATUS ENDPOINT - This is the fix!
       const statusResponse = await axios.get(
-        `https://syedalaibarehman-integrate.hf.space/gradio_api/status?event_id=${eventId}`
+        `https://syedalaibarehman-integrate.hf.space/gradio_api/queue/status?hash=${eventId}`
       );
       
       const status = statusResponse.data;
-      console.log(`Polling attempt ${attempt + 1}:`, status);
+      console.log(`Polling attempt ${attempt + 1}:`, status.status);
       
-      if (status.status === 'COMPLETED' || status.status === 'SUCCESS') {
-        return status.data || status.result;
-      } else if (status.status === 'FAILED' || status.status === 'ERROR') {
-        throw new Error('Prediction failed: ' + (status.error || status.message));
+      if (status.status === 'COMPLETED') {
+        console.log('Prediction completed:', status.data);
+        return status.data?.data?.[0];
+      } else if (status.status === 'FAILED') {
+        throw new Error('Prediction job failed');
+      } else if (status.status === 'PENDING') {
+        // Continue polling
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        continue;
       }
       
-      // Wait 1.5 seconds
+      // Wait before next poll
       await new Promise(resolve => setTimeout(resolve, 1500));
     } catch (error) {
-      console.error('Polling error:', error.message);
-      // Continue polling on network errors
-      if (attempt === maxAttempts - 1) throw error;
+      console.error(`Polling error attempt ${attempt + 1}:`, error.message);
+      
+      // If it's the last attempt, throw the error
+      if (attempt === maxAttempts - 1) {
+        throw new Error(`Polling failed after ${maxAttempts} attempts: ${error.message}`);
+      }
+      
+      // Wait before retry
+      await new Promise(resolve => setTimeout(resolve, 1500));
     }
   }
-  throw new Error('Prediction timeout after ' + maxAttempts + ' attempts');
+  throw new Error('Prediction timeout');
 }
