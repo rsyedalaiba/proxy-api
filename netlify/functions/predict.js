@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 exports.handler = async (event) => {
-  // CORS handle karna
+  // CORS handling
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 200,
@@ -22,14 +22,13 @@ exports.handler = async (event) => {
     const body = JSON.parse(event.body);
     console.log('Received data:', body);
     
-    // Gradio API ko call karenge
+    // Use the correct API endpoint - the one that works from browser
     const submitResponse = await axios.post(
-      'https://syedalaibarehman-integrate.hf.space/gradio_api/queue/push',
+      'https://syedalaibarehman-integrate.hf.space/gradio_api/call/predict_fn',
       {
-        fn_index: 0,
         data: [
           body.province,
-          body.district, 
+          body.district,
           body.crop_type,
           body.soil_type,
           body.sowing_date,
@@ -43,31 +42,45 @@ exports.handler = async (event) => {
           parseFloat(body.potassium),
           parseFloat(body.soil_ph),
           parseFloat(body.ndvi)
-        ],
-        session_hash: Math.random().toString(36).substring(2)
+        ]
       }
     );
 
-    const hash = submitResponse.data.hash;
-    console.log('Prediction submitted, hash:', hash);
+    console.log('Prediction submitted:', submitResponse.data);
 
-    // Result ka wait karenge
-    const result = await pollForResult(hash);
-    console.log('Prediction result:', result);
+    // Handle the async response
+    if (submitResponse.data.event_id) {
+      const result = await pollForResult(submitResponse.data.event_id);
+      console.log('Prediction result:', result);
+      
+      return {
+        statusCode: 200,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ 
+          success: true, 
+          prediction: result 
+        })
+      };
+    } else {
+      // If it's not async, return directly
+      return {
+        statusCode: 200,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ 
+          success: true, 
+          prediction: submitResponse.data 
+        })
+      };
+    }
     
-    return {
-      statusCode: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ 
-        success: true, 
-        prediction: result 
-      })
-    };
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error:', error.response?.data || error.message);
     return {
       statusCode: 500,
       headers: {
@@ -76,18 +89,19 @@ exports.handler = async (event) => {
       },
       body: JSON.stringify({ 
         success: false, 
-        error: error.message 
+        error: error.message,
+        details: error.response?.data 
       })
     };
   }
 };
 
-// Polling function
-async function pollForResult(hash, maxAttempts = 30) {
+// Polling function for async results
+async function pollForResult(eventId, maxAttempts = 30) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const statusResponse = await axios.get(
-        `https://syedalaibarehman-integrate.hf.space/gradio_api/queue/status?hash=${hash}`
+        `https://syedalaibarehman-integrate.hf.space/gradio_api/queue/status?hash=${eventId}`
       );
       
       const status = statusResponse.data;
@@ -99,12 +113,11 @@ async function pollForResult(hash, maxAttempts = 30) {
         throw new Error('Prediction job failed');
       }
       
-      // 1 second wait
       await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (error) {
       console.error('Polling error:', error);
       throw error;
     }
   }
-  throw new Error('Prediction timeout - took too long');
+  throw new Error('Prediction timeout');
 }
