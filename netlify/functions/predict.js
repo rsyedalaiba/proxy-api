@@ -22,8 +22,8 @@ exports.handler = async (event) => {
     const body = JSON.parse(event.body);
     console.log('Received data:', body);
     
-    // Use the correct API endpoint - the one that works from browser
-    const submitResponse = await axios.post(
+    // Use the working endpoint from our local tests
+    const response = await axios.post(
       'https://syedalaibarehman-integrate.hf.space/gradio_api/call/predict_fn',
       {
         data: [
@@ -46,12 +46,15 @@ exports.handler = async (event) => {
       }
     );
 
-    console.log('Prediction submitted:', submitResponse.data);
+    console.log('API Response:', response.data);
 
-    // Handle the async response
-    if (submitResponse.data.event_id) {
-      const result = await pollForResult(submitResponse.data.event_id);
-      console.log('Prediction result:', result);
+    // If it returns event_id, use the correct status endpoint
+    if (response.data && response.data.event_id) {
+      const eventId = response.data.event_id;
+      console.log('Got event_id:', eventId);
+      
+      // Use the correct status endpoint
+      const result = await pollForResult(eventId);
       
       return {
         statusCode: 200,
@@ -65,7 +68,7 @@ exports.handler = async (event) => {
         })
       };
     } else {
-      // If it's not async, return directly
+      // Direct response
       return {
         statusCode: 200,
         headers: {
@@ -74,7 +77,7 @@ exports.handler = async (event) => {
         },
         body: JSON.stringify({ 
           success: true, 
-          prediction: submitResponse.data 
+          prediction: response.data 
         })
       };
     }
@@ -90,34 +93,37 @@ exports.handler = async (event) => {
       body: JSON.stringify({ 
         success: false, 
         error: error.message,
-        details: error.response?.data 
+        response: error.response?.data
       })
     };
   }
 };
 
-// Polling function for async results
-async function pollForResult(eventId, maxAttempts = 30) {
+// Correct polling function
+async function pollForResult(eventId, maxAttempts = 20) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
+      // Correct status endpoint
       const statusResponse = await axios.get(
-        `https://syedalaibarehman-integrate.hf.space/gradio_api/queue/status?hash=${eventId}`
+        `https://syedalaibarehman-integrate.hf.space/gradio_api/status?event_id=${eventId}`
       );
       
       const status = statusResponse.data;
-      console.log(`Polling attempt ${attempt + 1}:`, status.status);
+      console.log(`Polling attempt ${attempt + 1}:`, status);
       
-      if (status.status === 'COMPLETED') {
-        return status.data?.data?.[0];
-      } else if (status.status === 'FAILED') {
-        throw new Error('Prediction job failed');
+      if (status.status === 'COMPLETED' || status.status === 'SUCCESS') {
+        return status.data || status.result;
+      } else if (status.status === 'FAILED' || status.status === 'ERROR') {
+        throw new Error('Prediction failed: ' + (status.error || status.message));
       }
       
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Wait 1.5 seconds
+      await new Promise(resolve => setTimeout(resolve, 1500));
     } catch (error) {
-      console.error('Polling error:', error);
-      throw error;
+      console.error('Polling error:', error.message);
+      // Continue polling on network errors
+      if (attempt === maxAttempts - 1) throw error;
     }
   }
-  throw new Error('Prediction timeout');
+  throw new Error('Prediction timeout after ' + maxAttempts + ' attempts');
 }
